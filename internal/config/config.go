@@ -9,7 +9,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const defaultAPIURL = "https://api-app.termique.app"
+const defaultAPIURL = "https://monitor.termique.app"
 const defaultInterval = 30
 
 // Config holds all agent configuration loaded from the TOML file.
