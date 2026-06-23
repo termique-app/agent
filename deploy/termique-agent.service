@@ -5,12 +5,30 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Run as an unprivileged dynamic user — metric collection (/proc, /sys,
+# statfs(/)) needs no privileges. DynamicUser provisions a transient account.
+DynamicUser=true
+# Fixed config path so the unit does not depend on $HOME. Provision this file
+# as mode 0600 readable by the service. The installer-generated unit instead
+# uses the installing user's ~/.config/termique-agent/config.toml.
+Environment=TERMIQUE_CONFIG=/etc/termique-agent/config.toml
 ExecStart=/usr/local/bin/termique-agent
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=termique-agent
+
+# Hardening — the agent needs no privileges and no filesystem write access.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

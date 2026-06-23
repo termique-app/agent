@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 
 	"github.com/pelletier/go-toml/v2"
@@ -21,6 +23,16 @@ type Config struct {
 
 // Load reads the TOML file at path, validates required fields, and applies defaults.
 func Load(path string) (*Config, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	// The config holds a plaintext bearer token. Refuse to run if it is
+	// group- or world-readable — a permissive config is a token-leak vector.
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("config: %s has insecure permissions %#o; run: chmod 600 %s", path, info.Mode().Perm(), path)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -43,6 +55,13 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = defaultInterval
+	}
+
+	// Enforce HTTPS — the token is sent as a Bearer header. A tampered config
+	// pointing at http:// would leak the token in cleartext.
+	u, err := url.Parse(cfg.APIURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, errors.New("config: api_url must be a valid https:// URL")
 	}
 
 	return &cfg, nil
