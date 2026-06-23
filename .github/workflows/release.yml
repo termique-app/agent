@@ -38,7 +38,7 @@ jobs:
           go build \
             -ldflags "-X main.version=${{ github.ref_name }}" \
             -o dist/termique-agent-linux-${{ matrix.GOARCH }} \
-            ./...
+            .
 
       - name: Checksum
         run: sha256sum dist/termique-agent-linux-${{ matrix.GOARCH }} > dist/termique-agent-linux-${{ matrix.GOARCH }}.sha256
