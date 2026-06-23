@@ -1,0 +1,16 @@
+[Unit]
+Description=Termique Monitoring Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/termique-agent
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=termique-agent
+
+[Install]
+WantedBy=multi-user.target
