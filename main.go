@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -17,6 +18,15 @@ import (
 var version = "dev"
 
 func main() {
+	// --version must short-circuit before config.Load runs: config.Load
+	// requires an existing 0600 config.toml, but the update script (and
+	// anyone checking a fresh install) needs to run this with zero config
+	// present. Print only the bare semver string, nothing else.
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
 	log.SetFlags(log.Ldate | log.Ltime)
 	log.Printf("termique-agent %s starting", version)
 

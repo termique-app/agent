@@ -19,6 +19,16 @@ type Config struct {
 	APIURL   string `toml:"api_url"`
 	Interval int    `toml:"interval"`
 	Debug    bool   `toml:"debug"`
+
+	// AutoUpdate is a *bool (not bool) on purpose: Go's zero value for an
+	// unset bool is false, which would be indistinguishable from an explicit
+	// `auto_update = false` in config.toml and silently flip unset users to
+	// the wrong default. nil means "key absent" — defaulted to true below.
+	// The Go binary itself never initiates or enforces updates; this field
+	// exists only so config parsing doesn't choke on the key and so
+	// cfg.AutoUpdate is available for a future Go-side use (FR-5.3). The
+	// actual enforcement lives in the bash update script (misc/worker).
+	AutoUpdate *bool `toml:"auto_update"`
 }
 
 // Load reads the TOML file at path, validates required fields, and applies defaults.
@@ -55,6 +65,10 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = defaultInterval
+	}
+	if cfg.AutoUpdate == nil {
+		defaultAutoUpdate := true
+		cfg.AutoUpdate = &defaultAutoUpdate
 	}
 
 	// Enforce HTTPS — the token is sent as a Bearer header. A tampered config

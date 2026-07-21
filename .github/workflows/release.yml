@@ -52,3 +52,12 @@ jobs:
           files: |
             dist/termique-agent-linux-${{ matrix.GOARCH }}
             dist/termique-agent-linux-${{ matrix.GOARCH }}.sha256
+
+      - name: Publish version to Termique API
+        env:
+          ADMIN_SECRET_KEY: ${{ secrets.ADMIN_SECRET_KEY }}
+        run: |
+          curl -fsSL -X POST "https://api-app.termique.app/api/app/version" \
+            -H "Content-Type: application/json" \
+            -H "X-Admin-Secret: ${ADMIN_SECRET_KEY}" \
+            -d "{\"version\":\"${{ github.ref_name }}\",\"platform\":\"agent-linux-${{ matrix.GOARCH }}\",\"downloadUrl\":\"https://github.com/termique-app/agent/releases/download/${{ github.ref_name }}/termique-agent-linux-${{ matrix.GOARCH }}\"}"
