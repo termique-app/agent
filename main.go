@@ -112,8 +112,18 @@ func main() {
 }
 
 // securityStatePath returns the path for the security-event tailing offset
-// state file, alongside the main config file (~/.config/termique-agent/).
+// state file. Prefers systemd's $STATE_DIRECTORY (set automatically when the
+// unit declares StateDirectory=termique-agent, resolving to
+// /var/lib/termique-agent — writable even under ProtectSystem=strict). Falls
+// back to alongside the main config file (~/.config/termique-agent/) for
+// non-systemd runs (local dev, `go run`) — note that path is READ-ONLY under
+// ProtectHome=read-only, so a systemd-managed install without
+// StateDirectory= set will fail to persist state (logged, non-fatal) until
+// its unit file is updated.
 func securityStatePath() string {
+	if dir := os.Getenv("STATE_DIRECTORY"); dir != "" {
+		return filepath.Join(dir, "security-state.json")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(".", ".config", "termique-agent", "security-state.json")
