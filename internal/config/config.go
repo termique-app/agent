@@ -11,6 +11,8 @@ import (
 
 const defaultAPIURL = "https://monitor.termique.app"
 const defaultInterval = 30
+const defaultSecurityEventsFlushIntervalSecs = 120
+const defaultSecurityEventsMaxBatch = 200
 
 // Config holds all agent configuration loaded from the TOML file.
 type Config struct {
@@ -29,6 +31,28 @@ type Config struct {
 	// cfg.AutoUpdate is available for a future Go-side use (FR-5.3). The
 	// actual enforcement lives in the bash update script (misc/worker).
 	AutoUpdate *bool `toml:"auto_update"`
+
+	// SecurityEventsEnabled is a plain bool (NOT *bool) on purpose, unlike
+	// AutoUpdate above: the desired default here is false, which is
+	// identical to Go's zero value for an unset bool, so there is no
+	// unset-vs-explicit-false ambiguity to guard against. AutoUpdate needed
+	// *bool specifically because its default is true (the zero-value trap).
+	// Do not "fix" this into a *bool — it would be unnecessary.
+	SecurityEventsEnabled bool `toml:"security_events_enabled"`
+
+	// ReverseProxyLogPath is optional and has no default — v1 does not
+	// auto-discover it (paths/formats vary too much to guess safely).
+	ReverseProxyLogPath string `toml:"reverse_proxy_log_path"`
+
+	// SecurityEventsFlushIntervalSecs controls how often the in-memory
+	// security-event buffer is flushed to the API, independent of the
+	// existing metrics Interval. Defaults to 120s when absent/zero.
+	SecurityEventsFlushIntervalSecs int `toml:"security_events_flush_interval"`
+
+	// SecurityEventsMaxBatch caps how many events a single flush sends.
+	// Anything beyond the cap is dropped with a single logged warning
+	// (v1 has no local disk spillover). Defaults to 200 when absent/zero.
+	SecurityEventsMaxBatch int `toml:"security_events_max_batch"`
 }
 
 // Load reads the TOML file at path, validates required fields, and applies defaults.
@@ -69,6 +93,12 @@ func Load(path string) (*Config, error) {
 	if cfg.AutoUpdate == nil {
 		defaultAutoUpdate := true
 		cfg.AutoUpdate = &defaultAutoUpdate
+	}
+	if cfg.SecurityEventsFlushIntervalSecs <= 0 {
+		cfg.SecurityEventsFlushIntervalSecs = defaultSecurityEventsFlushIntervalSecs
+	}
+	if cfg.SecurityEventsMaxBatch <= 0 {
+		cfg.SecurityEventsMaxBatch = defaultSecurityEventsMaxBatch
 	}
 
 	// Enforce HTTPS — the token is sent as a Bearer header. A tampered config

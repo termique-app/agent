@@ -12,10 +12,21 @@ import (
 	"github.com/termique-app/agent/internal/client"
 	"github.com/termique-app/agent/internal/config"
 	"github.com/termique-app/agent/internal/metrics"
+	"github.com/termique-app/agent/internal/security"
 )
 
 // version is injected at build time via -ldflags "-X main.version=<tag>".
 var version = "dev"
+
+// securityTailPollInterval is the security-event log-tail poll cadence —
+// deliberately short, distinct from BOTH the 30s metrics tick and the
+// (much longer, default 120s) security flush interval. It needs to be short
+// enough to catch http_error_spike's rolling 1-minute window promptly (a
+// spike that starts and ends between two widely-spaced polls could be
+// under-counted). Not exposed via config in v1 — ship a reasonable starting
+// constant, tune later (per the task doc's own note that this is an open,
+// non-blocking tunable).
+const securityTailPollInterval = 15 * time.Second
 
 func main() {
 	// --version must short-circuit before config.Load runs: config.Load
@@ -50,6 +61,38 @@ func main() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Security-event capture (opt-in, FR-1.1). When disabled (the default),
+	// secTailC/secFlushC stay nil — a nil channel blocks forever in a
+	// select, so those cases never fire and no ticker/goroutine/file handle
+	// is ever allocated for this feature (T1.2/T1.4 AC: zero I/O when off).
+	var secState *security.State
+	var secSources []security.Source
+	var secSpikes *security.SpikeAggregator
+	var secBuffer *security.Buffer
+	var secTailC <-chan time.Time
+	var secFlushC <-chan time.Time
+
+	if cfg.SecurityEventsEnabled {
+		var err error
+		secState, err = security.LoadState(securityStatePath())
+		if err != nil {
+			log.Printf("security: failed to load tailing state, starting fresh: %v", err)
+			secState = &security.State{Sources: map[string]security.SourceState{}}
+		}
+		secSources = security.DetectSources(cfg.ReverseProxyLogPath)
+		secSpikes = security.NewSpikeAggregator(security.DefaultHTTPErrorSpikeThreshold)
+		secBuffer = security.NewBuffer(cfg.SecurityEventsMaxBatch)
+
+		secTailTicker := time.NewTicker(securityTailPollInterval)
+		defer secTailTicker.Stop()
+		secFlushTicker := time.NewTicker(time.Duration(cfg.SecurityEventsFlushIntervalSecs) * time.Second)
+		defer secFlushTicker.Stop()
+		secTailC = secTailTicker.C
+		secFlushC = secFlushTicker.C
+
+		log.Printf("security: event capture enabled — %d source(s) detected", len(secSources))
+	}
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -57,10 +100,70 @@ func main() {
 		select {
 		case <-ticker.C:
 			collect(c, cfg, interval)
+		case <-secTailC:
+			pollSecuritySources(secSources, secState, secSpikes, secBuffer)
+		case <-secFlushC:
+			flushSecurityEvents(c, secBuffer)
 		case sig := <-quit:
 			log.Printf("received %s, shutting down", sig)
 			return
 		}
+	}
+}
+
+// securityStatePath returns the path for the security-event tailing offset
+// state file, alongside the main config file (~/.config/termique-agent/).
+func securityStatePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", ".config", "termique-agent", "security-state.json")
+	}
+	return filepath.Join(home, ".config", "termique-agent", "security-state.json")
+}
+
+// pollSecuritySources tails every watched source once, routes matched lines
+// through the appropriate matcher, and persists the updated tailing offsets.
+func pollSecuritySources(sources []security.Source, state *security.State, spikes *security.SpikeAggregator, buf *security.Buffer) {
+	if state == nil || buf == nil {
+		return
+	}
+	now := time.Now()
+	for _, src := range sources {
+		lines, err := security.TailNewLines(src, state)
+		if err != nil {
+			log.Printf("security: error tailing %s: %v", src.Path, err)
+			continue
+		}
+		for _, line := range lines {
+			if src.Name == "reverse_proxy" {
+				if ip, statusClass, ok := security.MatchAccessLine(line); ok {
+					if ev := spikes.Observe(ip, statusClass, now); ev != nil {
+						buf.Add(*ev)
+					}
+				}
+				continue
+			}
+			if ev := security.MatchLine(src.Name, line, now); ev != nil {
+				buf.Add(*ev)
+			}
+		}
+	}
+	if err := state.Save(securityStatePath()); err != nil {
+		log.Printf("security: failed to persist tailing state: %v", err)
+	}
+}
+
+// flushSecurityEvents drains the buffer (up to the configured cap) and
+// POSTs it via the client. A failed POST leaves the batch buffered for retry
+// on the next flush (FR-2.5) — Buffer.Flush already handles that contract.
+func flushSecurityEvents(c *client.Client, buf *security.Buffer) {
+	if buf == nil {
+		return
+	}
+	if err := buf.Flush(func(batch []security.Event) error {
+		return c.PushSecurityEvents(batch)
+	}); err != nil {
+		log.Printf("security: flush failed, batch retained for retry: %v", err)
 	}
 }
 
