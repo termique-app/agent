@@ -60,23 +60,41 @@ func TestMatchLine_NoMatch(t *testing.T) {
 	}
 }
 
-func TestMatchAccessLine(t *testing.T) {
+func TestParseAccessLine(t *testing.T) {
 	line := `203.0.113.7 - - [22/Jul/2026:10:15:32 +0000] "GET /nonexistent HTTP/1.1" 404 512 "-" "-"`
-	ip, statusClass, ok := MatchAccessLine(line)
+	ip, path, statusClass, ok := ParseAccessLine(line)
 	if !ok {
 		t.Fatal("expected a match")
 	}
-	if ip != "203.0.113.7" || statusClass != "4xx" {
-		t.Fatalf("unexpected fields: ip=%s statusClass=%s", ip, statusClass)
+	if ip != "203.0.113.7" || path != "/nonexistent" || statusClass != "4xx" {
+		t.Fatalf("unexpected fields: ip=%s path=%s statusClass=%s", ip, path, statusClass)
 	}
 
-	okLine := `203.0.113.7 - - [22/Jul/2026:10:15:32 +0000] "GET / HTTP/1.1" 200 512 "-" "-"`
-	if _, _, ok := MatchAccessLine(okLine); ok {
-		t.Fatal("expected 2xx line to not match (not a 4xx/5xx)")
+	// A 2xx/3xx line still matches (path is always extracted, for
+	// PathSpikeAggregator's benefit) — but statusClass is empty, since it's
+	// never a candidate for http_error_spike.
+	okLine := `203.0.113.7 - - [22/Jul/2026:10:15:32 +0000] "GET /wp-login.php HTTP/1.1" 200 512 "-" "-"`
+	ip2, path2, statusClass2, ok2 := ParseAccessLine(okLine)
+	if !ok2 {
+		t.Fatal("expected a 2xx line to still match")
+	}
+	if ip2 != "203.0.113.7" || path2 != "/wp-login.php" || statusClass2 != "" {
+		t.Fatalf("unexpected fields for 2xx line: ip=%s path=%s statusClass=%q", ip2, path2, statusClass2)
 	}
 
-	if _, _, ok := MatchAccessLine("not a log line at all"); ok {
+	if _, _, _, ok := ParseAccessLine("not a log line at all"); ok {
 		t.Fatal("expected garbage line to not match")
+	}
+}
+
+func TestParseAccessLine_StripsQueryString(t *testing.T) {
+	line := `203.0.113.7 - - [22/Jul/2026:10:15:32 +0000] "POST /wp-login.php?action=login&nonce=abc123 HTTP/1.1" 200 512 "-" "-"`
+	_, path, _, ok := ParseAccessLine(line)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if path != "/wp-login.php" {
+		t.Fatalf("expected query string stripped, got path=%q", path)
 	}
 }
 
@@ -140,5 +158,63 @@ func TestSpikeAggregator_NewWindowResetsAndCanEmitAgain(t *testing.T) {
 	}
 	if ev2.WindowStart != next {
 		t.Fatalf("expected new window's WindowStart to reset, got %v", ev2.WindowStart)
+	}
+}
+
+func TestPathSpikeAggregator_EmitsExactlyOncePerWindowRegardlessOfStatus(t *testing.T) {
+	agg := NewPathSpikeAggregator(20)
+	base := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+
+	var events []*Event
+	for i := 0; i < 21; i++ {
+		// All within the same 1-minute window — simulates a login-form
+		// brute force where every attempt returns 200, not an HTTP error.
+		ts := base.Add(time.Duration(i) * time.Second)
+		if ev := agg.Observe("203.0.113.9", "/wp-login.php", ts); ev != nil {
+			events = append(events, ev)
+		}
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 event for 21 requests in one window, got %d", len(events))
+	}
+	if events[0].Type != EventHTTPPathBruteForce {
+		t.Fatalf("expected http_path_brute_force type, got %s", events[0].Type)
+	}
+	if events[0].Path != "/wp-login.php" || events[0].SourceIP != "203.0.113.9" || events[0].Count != 21 {
+		t.Fatalf("unexpected event fields: %+v", events[0])
+	}
+}
+
+func TestPathSpikeAggregator_DifferentPathsTrackedIndependently(t *testing.T) {
+	agg := NewPathSpikeAggregator(2)
+	base := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+
+	// Two hits on /a and two hits on /b from the same IP — neither path
+	// alone crosses the threshold of 2 (count must EXCEED threshold), and
+	// hits on one path must not count toward the other's total.
+	agg.Observe("203.0.113.9", "/a", base)
+	agg.Observe("203.0.113.9", "/b", base)
+	if ev := agg.Observe("203.0.113.9", "/a", base.Add(time.Second)); ev != nil {
+		t.Fatalf("expected no event yet for /a, got %+v", ev)
+	}
+	if ev := agg.Observe("203.0.113.9", "/b", base.Add(time.Second)); ev != nil {
+		t.Fatalf("expected no event yet for /b, got %+v", ev)
+	}
+
+	ev := agg.Observe("203.0.113.9", "/a", base.Add(2*time.Second))
+	if ev == nil || ev.Path != "/a" {
+		t.Fatalf("expected /a to cross its own threshold independently, got %+v", ev)
+	}
+}
+
+func TestPathSpikeAggregator_BelowThresholdNeverEmits(t *testing.T) {
+	agg := NewPathSpikeAggregator(20)
+	base := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+
+	for i := 0; i < 20; i++ {
+		if ev := agg.Observe("203.0.113.9", "/wp-login.php", base.Add(time.Duration(i)*time.Second)); ev != nil {
+			t.Fatalf("expected no event below/at threshold, got one at i=%d: %+v", i, ev)
+		}
 	}
 }

@@ -7,11 +7,12 @@ import "time"
 type EventType string
 
 const (
-	EventSSHAuthFail    EventType = "ssh_auth_fail"
-	EventSSHAuthSuccess EventType = "ssh_auth_success"
-	EventFail2banBan    EventType = "fail2ban_ban"
-	EventFail2banUnban  EventType = "fail2ban_unban"
-	EventHTTPErrorSpike EventType = "http_error_spike"
+	EventSSHAuthFail        EventType = "ssh_auth_fail"
+	EventSSHAuthSuccess     EventType = "ssh_auth_success"
+	EventFail2banBan        EventType = "fail2ban_ban"
+	EventFail2banUnban      EventType = "fail2ban_unban"
+	EventHTTPErrorSpike     EventType = "http_error_spike"
+	EventHTTPPathBruteForce EventType = "http_path_brute_force"
 )
 
 // Event is a single structured security event. Only the fields relevant to
@@ -22,7 +23,7 @@ type Event struct {
 	Type EventType `json:"type"`
 	Ts   time.Time `json:"ts"`
 
-	// ssh_auth_fail / ssh_auth_success / http_error_spike
+	// ssh_auth_fail / ssh_auth_success / http_error_spike / http_path_brute_force
 	SourceIP string `json:"source_ip,omitempty"`
 
 	// ssh_auth_fail / ssh_auth_success
@@ -32,8 +33,15 @@ type Event struct {
 	IP   string `json:"ip,omitempty"`
 	Jail string `json:"jail,omitempty"`
 
-	// http_error_spike
+	// http_error_spike / http_path_brute_force
 	WindowStart time.Time `json:"window_start,omitempty"`
-	StatusClass string    `json:"status_class,omitempty"`
 	Count       int       `json:"count,omitempty"`
+
+	// http_error_spike only
+	StatusClass string `json:"status_class,omitempty"`
+
+	// http_path_brute_force only — request path with query string stripped,
+	// so randomized query params (nonces, etc.) don't split one attack
+	// across many distinct counters.
+	Path string `json:"path,omitempty"`
 }

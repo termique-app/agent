@@ -68,6 +68,7 @@ func main() {
 	var secState *security.State
 	var secSources []security.Source
 	var secSpikes *security.SpikeAggregator
+	var secPathSpikes *security.PathSpikeAggregator
 	var secBuffer *security.Buffer
 	var secTailC <-chan time.Time
 	var secFlushC <-chan time.Time
@@ -81,6 +82,7 @@ func main() {
 		}
 		secSources = security.DetectSources(cfg.ReverseProxyLogPath)
 		secSpikes = security.NewSpikeAggregator(security.DefaultHTTPErrorSpikeThreshold)
+		secPathSpikes = security.NewPathSpikeAggregator(security.DefaultPathBruteForceThreshold)
 		secBuffer = security.NewBuffer(cfg.SecurityEventsMaxBatch)
 
 		secTailTicker := time.NewTicker(securityTailPollInterval)
@@ -101,7 +103,7 @@ func main() {
 		case <-ticker.C:
 			collect(c, cfg, interval)
 		case <-secTailC:
-			pollSecuritySources(secSources, secState, secSpikes, secBuffer)
+			pollSecuritySources(secSources, secState, secSpikes, secPathSpikes, secBuffer)
 		case <-secFlushC:
 			flushSecurityEvents(c, secBuffer)
 		case sig := <-quit:
@@ -133,7 +135,7 @@ func securityStatePath() string {
 
 // pollSecuritySources tails every watched source once, routes matched lines
 // through the appropriate matcher, and persists the updated tailing offsets.
-func pollSecuritySources(sources []security.Source, state *security.State, spikes *security.SpikeAggregator, buf *security.Buffer) {
+func pollSecuritySources(sources []security.Source, state *security.State, spikes *security.SpikeAggregator, pathSpikes *security.PathSpikeAggregator, buf *security.Buffer) {
 	if state == nil || buf == nil {
 		return
 	}
@@ -146,10 +148,20 @@ func pollSecuritySources(sources []security.Source, state *security.State, spike
 		}
 		for _, line := range lines {
 			if src.Name == "reverse_proxy" {
-				if ip, statusClass, ok := security.MatchAccessLine(line); ok {
+				ip, path, statusClass, ok := security.ParseAccessLine(line)
+				if !ok {
+					continue
+				}
+				// http_error_spike: 4xx/5xx only.
+				if statusClass != "" {
 					if ev := spikes.Observe(ip, statusClass, now); ev != nil {
 						buf.Add(*ev)
 					}
+				}
+				// http_path_brute_force: every request, regardless of status —
+				// a login-form brute force typically returns 200/302.
+				if ev := pathSpikes.Observe(ip, path, now); ev != nil {
+					buf.Add(*ev)
 				}
 				continue
 			}
