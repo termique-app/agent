@@ -55,12 +55,6 @@ func main() {
 	c := client.New(cfg.APIURL, cfg.Token, cfg.ServerID)
 	interval := time.Duration(cfg.Interval) * time.Second
 
-	// Collect once immediately on startup, then on the ticker.
-	collect(c, cfg, interval)
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
 	// Security-event capture (opt-in, FR-1.1). When disabled (the default),
 	// secTailC/secFlushC stay nil — a nil channel blocks forever in a
 	// select, so those cases never fire and no ticker/goroutine/file handle
@@ -73,6 +67,21 @@ func main() {
 	var secTailC <-chan time.Time
 	var secFlushC <-chan time.Time
 
+	// secSourceStatus is the reportable (path + active flag, never contents)
+	// status sent on every ingest cycle (FR-4.3/D-6). Detection is a
+	// one-time startup computation today (secSources never changes for the
+	// life of the process — it only changes across a restart, which
+	// recomputes it fresh), so always sending this startup-computed list on
+	// every ingest cycle is simpler than diffing for changes and correctly
+	// satisfies "reported on startup and whenever the set changes" without
+	// adding new file-existence polling. A nil pointer here (default, capture
+	// disabled) omits the field from the wire payload entirely; a non-nil
+	// pointer — set below, even to an empty slice — always sends the field
+	// (see client.ingestPayload for why this must be a pointer, not a bare
+	// slice: the empty-vs-omitted distinction is the silent-misconfiguration
+	// signal T5.4 surfaces).
+	var secSourceStatus *[]security.SourceStatus
+
 	if cfg.SecurityEventsEnabled {
 		var err error
 		secState, err = security.LoadState(securityStatePath())
@@ -81,6 +90,8 @@ func main() {
 			secState = &security.State{Sources: map[string]security.SourceState{}}
 		}
 		secSources = security.DetectSources(cfg.ReverseProxyLogPath)
+		statuses := security.SourcesToStatus(secSources)
+		secSourceStatus = &statuses
 		secSpikes = security.NewSpikeAggregator(security.DefaultHTTPErrorSpikeThreshold)
 		secPathSpikes = security.NewPathSpikeAggregator(security.DefaultPathBruteForceThreshold)
 		secBuffer = security.NewBuffer(cfg.SecurityEventsMaxBatch)
@@ -95,13 +106,19 @@ func main() {
 		log.Printf("security: event capture enabled — %d source(s) detected", len(secSources))
 	}
 
+	// Collect once immediately on startup, then on the ticker.
+	collect(c, cfg, interval, secSourceStatus)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	for {
 		select {
 		case <-ticker.C:
-			collect(c, cfg, interval)
+			collect(c, cfg, interval, secSourceStatus)
 		case <-secTailC:
 			pollSecuritySources(secSources, secState, secSpikes, secPathSpikes, secBuffer)
 		case <-secFlushC:
@@ -189,8 +206,10 @@ func flushSecurityEvents(c *client.Client, buf *security.Buffer) {
 	}
 }
 
-// collect gathers a snapshot and ships it to the API.
-func collect(c *client.Client, cfg *config.Config, interval time.Duration) {
+// collect gathers a snapshot and ships it to the API, alongside the
+// startup-computed security-source status (nil when capture is disabled,
+// FR-4.3/D-6 — see the secSourceStatus comment in main()).
+func collect(c *client.Client, cfg *config.Config, interval time.Duration, secSourceStatus *[]security.SourceStatus) {
 	snap, err := metrics.Collect(interval)
 	if err != nil {
 		log.Printf("error collecting metrics: %v", err)
@@ -202,7 +221,7 @@ func collect(c *client.Client, cfg *config.Config, interval time.Duration) {
 			snap.CpuPercent, snap.RamPercent, snap.DiskPercent)
 	}
 
-	if err := c.Send(snap); err != nil {
+	if err := c.Send(snap, secSourceStatus); err != nil {
 		log.Printf("error sending metrics: %v", err)
 		return
 	}

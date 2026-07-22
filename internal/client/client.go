@@ -33,10 +33,31 @@ func New(apiURL, token, serverID string) *Client {
 	}
 }
 
-// Send POSTs the snapshot to /api/monitoring/ingest.
-// The token is never included in log output.
-func (c *Client) Send(snap *metrics.Snapshot) error {
-	body, err := json.Marshal(snap)
+// ingestPayload is the JSON body posted to /api/monitoring/ingest. It embeds
+// Snapshot by pointer so its fields marshal flattened (unchanged wire shape
+// for agents that never report security sources), plus an optional
+// SecuritySources field (FR-4.3/D-6).
+//
+// SecuritySources is a POINTER to a slice, not a bare slice, so `omitempty`
+// only triggers on a nil pointer — a non-nil pointer to an EMPTY slice still
+// marshals as `"security_sources":[]`. This distinction is load-bearing:
+//   - nil pointer            -> field omitted entirely (capture disabled, or
+//     an older agent that never populates this field at all).
+//   - pointer to []           -> capture enabled, zero sources detected — the
+//     silent-misconfiguration case FR-4.3 exists to surface.
+//   - pointer to [...]        -> capture enabled, N sources actively tailed.
+type ingestPayload struct {
+	*metrics.Snapshot
+	SecuritySources *[]security.SourceStatus `json:"security_sources,omitempty"`
+}
+
+// Send POSTs the snapshot (plus optional detected security-source status,
+// FR-4.3/D-6) to /api/monitoring/ingest. Pass nil for securitySources when
+// security-event capture is disabled — the field is then omitted from the
+// wire body entirely, matching the exact pre-existing payload shape. The
+// token is never included in log output.
+func (c *Client) Send(snap *metrics.Snapshot, securitySources *[]security.SourceStatus) error {
+	body, err := json.Marshal(ingestPayload{Snapshot: snap, SecuritySources: securitySources})
 	if err != nil {
 		return fmt.Errorf("client: marshal: %w", err)
 	}
