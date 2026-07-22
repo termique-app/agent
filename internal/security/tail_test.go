@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestTailNewLines_ResumesFromLastOffset(t *testing.T) {
+func TestTailNewLines_FirstEverPollStartsAtEOFNotZero(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "auth.log")
 	if err := os.WriteFile(path, []byte("line1\nline2\n"), 0o600); err != nil {
@@ -14,6 +14,51 @@ func TestTailNewLines_ResumesFromLastOffset(t *testing.T) {
 	}
 
 	state := &State{Sources: map[string]SourceState{}}
+	src := Source{Name: "auth", Path: path}
+
+	// A source with no prior recorded state (never seen before — true on a
+	// fresh install, and would recur on every restart before state
+	// persistence was fixed) must NOT re-process the file's entire existing
+	// content as "new" — it starts tailing from the current end only.
+	lines, err := TailNewLines(src, state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(lines) != 0 {
+		t.Fatalf("expected no lines on a never-seen-before source, got %+v", lines)
+	}
+
+	// Append more content, without re-opening a new file — simulates a
+	// normal (non-rotated) log growing.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("failed to open for append: %v", err)
+	}
+	if _, err := f.WriteString("line3\n"); err != nil {
+		t.Fatalf("failed to append: %v", err)
+	}
+	f.Close()
+
+	lines, err = TailNewLines(src, state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "line3" {
+		t.Fatalf("expected only the newly appended line, got %+v", lines)
+	}
+}
+
+func TestTailNewLines_ResumesFromLastOffset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.log")
+	if err := os.WriteFile(path, []byte("line1\nline2\n"), 0o600); err != nil {
+		t.Fatalf("failed to write test log: %v", err)
+	}
+
+	// Seed a KNOWN state at offset 0, simulating a source the agent has
+	// already been tracking from the start — distinct from the never-seen-
+	// before case covered by TestTailNewLines_FirstEverPollStartsAtEOFNotZero.
+	state := &State{Sources: map[string]SourceState{path: {Offset: 0}}}
 	src := Source{Name: "auth", Path: path}
 
 	lines, err := TailNewLines(src, state)
@@ -51,7 +96,8 @@ func TestTailNewLines_PartialTrailingLineNotConsumed(t *testing.T) {
 		t.Fatalf("failed to write test log: %v", err)
 	}
 
-	state := &State{Sources: map[string]SourceState{}}
+	// Seed a KNOWN state at offset 0 — see TestTailNewLines_ResumesFromLastOffset.
+	state := &State{Sources: map[string]SourceState{path: {Offset: 0}}}
 	src := Source{Name: "auth", Path: path}
 
 	lines, err := TailNewLines(src, state)

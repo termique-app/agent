@@ -97,6 +97,15 @@ func TailNewLines(src Source, state *State) ([]string, error) {
 		// rotated or truncated: offset stays 0 — resume from start of the
 		// "new" file (a rotated file's low offsets are content we've never
 		// seen, since the old inode's bytes are gone from this path).
+	} else {
+		// Never seen this source before — start from its CURRENT end, not
+		// byte 0. Per LoadState's own doc comment this should tail only new
+		// activity going forward; starting at 0 instead re-processes the
+		// entire pre-existing file as "new" events on every occurrence of
+		// "no saved state" — which, before state persistence was fixed to
+		// actually survive a restart, was EVERY restart, live-confirmed to
+		// flood a 200-event batch cap by 40x on a 6.7MB auth.log.
+		offset = info.Size()
 	}
 
 	if offset > 0 {
